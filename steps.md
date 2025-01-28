@@ -182,7 +182,7 @@ class CRNotesCollection:
         }
 
 class CRSummary(BaseModel):
-    cr_id: str = Field(description="The MOLY ID of the CR being summarized")
+    cr_id: str = Field(description="The MAX ID of the CR being summarized")
     summary: str = Field(description="Detailed analysis of the CR notes")
 
 class CRAnalysisResponse(BaseModel):
@@ -207,13 +207,13 @@ def request_parser(state: List[BaseMessage]) -> List[BaseMessage]:
     # Get the input text
     input_text = state[0].content
     
-    # Find all MOLY IDs
-    moly_ids = re.findall(r'MOLY\d+', input_text)
+    # Find all MAX IDs
+    max_ids = re.findall(r'MAX\d+', input_text)
     
     # Create a structured message with the findings
     result_message = f"""
 Original Request: {input_text}
-Found CR IDs: {', '.join(moly_ids) if moly_ids else 'No CR IDs found'}
+Found CR IDs: {', '.join(max_ids) if max_ids else 'No CR IDs found'}
 """
     
     return state + [HumanMessage(content=result_message)]
@@ -223,15 +223,15 @@ async def note_processor(state: List[BaseMessage]) -> List[BaseMessage]:
     # Get the last message which should contain the CR IDs
     last_message = state[-1].content
     
-    # Extract MOLY IDs using regex, but only from the "Found CR IDs:" line
+    # Extract MAX IDs using regex, but only from the "Found CR IDs:" line
     cr_line = re.search(r'Found CR IDs: (.*)', last_message)
     if cr_line:
-        moly_ids = re.findall(r'MOLY\d+', cr_line.group(1))
+        max_ids = re.findall(r'MAX\d+', cr_line.group(1))
     else:
-        moly_ids = []
+        max_ids = []
     
     # Create tasks for parallel execution
-    tasks = [fetch_notes_async(moly_id) for moly_id in moly_ids]
+    tasks = [fetch_notes_async(max_id) for max_id in max_ids]
     
     # Wait for all tasks to complete
     cr_results = await asyncio.gather(*tasks)
@@ -254,7 +254,7 @@ def first_responder(state: List[BaseMessage]) -> List[BaseMessage]:
     {
         "summaries": [
             {
-                "cr_id": "MOLY ID",
+                "cr_id": "MAX ID",
                 "summary": "Detailed analysis"
             },
             ...
