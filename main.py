@@ -17,18 +17,13 @@ from chains import (
     explain_diff
 )
 
-def should_end(state: List[BaseMessage]) -> bool:
-    """Check if the workflow should end"""
-    last_message = state[-1].content
-    return "error" in last_message.lower() or "diff_explanation" in last_message
-
 def route_to_png_conversion(state: List[BaseMessage]) -> str:
     """Route to appropriate PNG conversion node based on success of PDF conversion"""
     last_message = state[-1].content
     result_dict = eval(last_message)
     
     if not result_dict.get("success", False):
-        return END
+        return END  # This will end the graph if there's an error
     
     if "original" in state[-2].content:
         return "original_pdf_to_png"
@@ -91,8 +86,8 @@ builder.add_edge("generate_diff", "explain_diff")
 # Set entry point
 builder.set_entry_point("request")
 
-# Add end condition
-builder.set_finish_criterion(should_end)
+# Add finish point for the final node (explain_diff)
+builder.set_finish_point("explain_diff")
 
 # Compile the graph
 graph = builder.compile()
@@ -100,7 +95,7 @@ graph = builder.compile()
 async def main():
     """Main function to run the document processing workflow"""
     try:
-        input_message = "Process documents at path/to/original.docx and path/to/updated.docx"
+        input_message = "Process documents at ./test_files/test.docx and ./test_files/test.docx"
         result = await graph.ainvoke([HumanMessage(content=input_message)])
         
         # Extract the final diff explanation from the result
