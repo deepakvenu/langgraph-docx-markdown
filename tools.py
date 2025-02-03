@@ -1,11 +1,13 @@
 from typing import List
 import os
+import json
 import base64
 from pydantic import BaseModel, Field
 from docx2pdf import convert as docx2pdf_convert
 from pdf2image import convert_from_path
 from langchain_openai import ChatOpenAI
-from langchain.tools import tool
+from langchain.tools import tool, Tool
+from langchain_core.messages import BaseMessage, HumanMessage
 
 class DocxToPdfResult(BaseModel):
     pdf_path: str = Field(description="Path to the generated PDF file")
@@ -23,18 +25,21 @@ class MarkdownResult(BaseModel):
     error: str = Field(default="", description="Error message if conversion failed")
 
 @tool
-def docx_to_pdf_converter(docx_path: str, output_dir: str) -> DocxToPdfResult:
+def docx_to_pdf_converter(docx_path: str) -> DocxToPdfResult:
     """
     Convert a DOCX file to PDF format. This function requires both a DOCX file path and an output directory.
 
     Parameters:
         docx_path (str): The path to the DOCX file to be converted. (Required)
-        output_dir (str): The directory where the output PDF will be saved. (Required)
 
     Returns:
         DocxToPdfResult: The result of the conversion, including the path to the PDF and a success flag.
     """
     try:
+                
+        # Get output directory
+        output_dir = os.path.dirname(docx_path)
+
         pdf_dir = os.path.join(output_dir, "pdf_files")
         os.makedirs(pdf_dir, exist_ok=True)
         
@@ -47,9 +52,11 @@ def docx_to_pdf_converter(docx_path: str, output_dir: str) -> DocxToPdfResult:
         return DocxToPdfResult(pdf_path="", success=False, error=str(e))
 
 @tool
-def pdf_to_png_converter(pdf_path: str, output_dir: str, dpi: int = 300) -> PdfToPngResult:
-    """Convert a PDF file to PNG images. Takes pdf_path, output_dir, and optional dpi as parameters."""
+def pdf_to_png_converter(pdf_path: str, dpi: int = 300) -> PdfToPngResult:
+    """Convert a PDF file to PNG images. Takes pdf_path and optional dpi as parameters."""
     try:
+        # Get output directory
+        output_dir = os.path.dirname(pdf_path)
         png_dir = os.path.join(output_dir, "png_files")
         os.makedirs(png_dir, exist_ok=True)
         
@@ -92,4 +99,49 @@ def png_to_markdown_converter(png_paths: List[str], output_dir: str) -> Markdown
             
         return MarkdownResult(markdown_path=markdown_path, success=True)
     except Exception as e:
-        return MarkdownResult(markdown_path="", success=False, error=str(e)) 
+        return MarkdownResult(markdown_path="", success=False, error=str(e))
+
+def local_tool_call(state: List[BaseMessage]) -> List[BaseMessage]:
+    """Execute the tool call identified by the coordinator."""
+    try:
+        # Get the tool call information from the last message
+        result_dict = eval(state[-1].content)  # Use eval instead of json.loads for the outer structure
+        
+        # Extract tool call information
+        tool_calls = result_dict.get('additional_kwargs', {}).get('tool_calls', [])
+        if not tool_calls:
+            return state + [HumanMessage(content="Error: No tool calls found")]
+        
+        tool_call = tool_calls[0]
+        tool_name = tool_call['function']['name']
+        tool_args = json.loads(tool_call['function']['arguments'])  # Parse the arguments JSON
+        
+        # Initialize tools
+        tools = [
+            Tool(
+                func=docx_to_pdf_converter,
+                name="docx_to_pdf_converter",
+                description=docx_to_pdf_converter.__doc__
+            ),
+            Tool(
+                func=pdf_to_png_converter,
+                name="pdf_to_png_converter",
+                description=pdf_to_png_converter.__doc__
+            ),
+            Tool(
+                func=png_to_markdown_converter,
+                name="png_to_markdown_converter",
+                description=png_to_markdown_converter.__doc__
+            )
+        ]
+        
+        # Find and execute the tool
+        for tool in tools:
+            if tool.name == tool_name:
+                tool_result = tool.invoke(tool_args)
+                return state + [HumanMessage(content=str(tool_result.model_dump()))]
+        
+        return state + [HumanMessage(content="Error: Tool not found")]
+        
+    except Exception as e:
+        return state + [HumanMessage(content=f"Error in tool execution: {str(e)}")] 

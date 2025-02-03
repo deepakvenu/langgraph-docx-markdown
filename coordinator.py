@@ -1,9 +1,7 @@
 import os
-import json
-from typing import List
+from typing import List, Dict, Any
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain.tools import Tool
 from tools import (
     docx_to_pdf_converter,
@@ -22,11 +20,26 @@ Follow these steps:
 3. Convert the PNG files to Markdown using png_to_markdown_converter
 
 Check the success status of each conversion before proceeding to the next step.
+
+Current Progress:
+{scratch_pad}
 """
 
-def coordinator(state: List[BaseMessage]) -> List[BaseMessage]:
-    """Coordinate the document processing workflow using LLM and allow the LLM to trigger tool calls."""
+def coordinator(state: List[BaseMessage], scratch_pad: Dict[str, Any] = None) -> List[BaseMessage]:
+    """
+    Coordinate the document processing workflow using LLM.
+    Uses scratch_pad to track progress and previous results.
+    Returns the state with the LLM's complete response appended.
+    """
     try:
+        # Initialize scratch_pad if None
+        if scratch_pad is None:
+            scratch_pad = {
+                "completed_steps": [],
+                "current_step": "start",
+                "last_result": None
+            }
+        
         # Initialize tools with descriptions from their docstrings
         tools = [
             Tool(
@@ -47,53 +60,66 @@ def coordinator(state: List[BaseMessage]) -> List[BaseMessage]:
         ]
 
         # Initialize LLM with bound tools
-        llm_with_tools = ChatOpenAI(model="gpt-4o-mini").bind_tools(tools)
+        llm_with_tools = ChatOpenAI(model="gpt-4").bind_tools(tools)
         
-        # Get input path and validate
-        input_path = state[0].content.strip()
-        if not input_path.endswith('.docx'):
-            return state + [HumanMessage(content="Error: Input must be a path to a .docx file")]
+        # Get input path and validate if this is the first message
+        if len(state) == 1:
+            input_path = state[0].content.strip()
+            if not input_path.endswith('.docx'):
+                return state + [HumanMessage(content="Error: Input must be a path to a .docx file")]
+            output_dir = os.path.dirname(input_path)
+        else:
+            # For subsequent messages, get the paths from the first message
+            input_path = state[0].content.strip()
+            output_dir = os.path.dirname(input_path)
         
-        # Get output directory
-        output_dir = os.path.dirname(input_path)
+        # Update scratch_pad based on the last message if it contains a tool result
+        if len(state) > 1:
+            try:
+                last_result = eval(state[-1].content)
+                if isinstance(last_result, dict) and "success" in last_result:
+                    scratch_pad["last_result"] = last_result
+                    if last_result["success"]:
+                        # Determine which step was completed based on the result type
+                        if "pdf_path" in last_result:
+                            scratch_pad["completed_steps"].append("docx_to_pdf")
+                            scratch_pad["current_step"] = "pdf_to_png"
+                        elif "png_paths" in last_result:
+                            scratch_pad["completed_steps"].append("pdf_to_png")
+                            scratch_pad["current_step"] = "png_to_markdown"
+                        elif "markdown_path" in last_result:
+                            scratch_pad["completed_steps"].append("png_to_markdown")
+                            scratch_pad["current_step"] = "complete"
+            except:
+                pass  # If we can't parse the last message as a result, continue without updating scratch_pad
         
-        # Execute agent with both system prompt and user instruction
-        result = llm_with_tools.invoke([
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=f"Process the document at {input_path} with output directory {output_dir}")
+        # Format scratch pad for prompt
+        scratch_pad_text = "\n".join([
+            f"- Completed Steps: {', '.join(scratch_pad['completed_steps']) if scratch_pad['completed_steps'] else 'None'}",
+            f"- Current Step: {scratch_pad['current_step']}",
+            f"- Last Result: {scratch_pad['last_result']}"
         ])
         
-        # Safely extract tool call data (whether it's a list or dict)
-        tool_call_data = result.additional_kwargs.get("tool_calls")
-        if tool_call_data:
-            # If tool_call_data is a list, get the first element; else assume it is dict
-            tool_call = tool_call_data[0] if isinstance(tool_call_data, list) else tool_call_data
-            
-            # Support both formats: either within a "function" key or directly contained
-            if "function" in tool_call:
-                tool_name = tool_call["function"]["name"]
-                tool_args = json.loads(tool_call["function"]["arguments"])
-            else:
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("args", {})
-
-            # Adjust parameters for docx_to_pdf_converter if necessary.
-            if tool_name == "docx_to_pdf_converter":
-                if "__arg1" in tool_args:
-                    tool_args["docx_path"] = tool_args.pop("__arg1")
-                if "output_dir" not in tool_args:
-                    tool_args["output_dir"] = output_dir
-
-            # Find and execute the corresponding tool using the invoke method
-            for tool in tools:
-                if tool.name == tool_name:
-                    tool_result = tool.invoke(tool_args)
-                    return state + [HumanMessage(content=str(tool_result.model_dump()))]
-            
-            return state + [HumanMessage(content="Error: Tool not found")]
+        # Execute LLM with system prompt (including scratch pad) and conversation history
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT.format(scratch_pad=scratch_pad_text)),
+            HumanMessage(content=f"Process the document at {input_path} with output directory {output_dir}")
+        ]
         
-        # If no tool call is present, return the final response
-        return state + [HumanMessage(content=str(result.content))]
+        # Add any additional context from previous messages
+        if len(state) > 1:
+            messages.extend(state[1:])
+        
+        result = llm_with_tools.invoke(messages)
+        
+        # Return the complete result including any tool calls
+        # Package the entire result (including tool_calls if present) as a JSON string
+        result_dict = {
+            "content": result.content,
+            "additional_kwargs": result.additional_kwargs
+        }
+        
+        return state + [HumanMessage(content=str(result_dict))]
         
     except Exception as e:
         return state + [HumanMessage(content=f"Error in coordination: {str(e)}")] 
